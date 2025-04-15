@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Bomberman Maze</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 20px;
+            font-family: Arial, sans-serif;
+            color: white;
+        }
+        
+        .game-ui {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+        }
+
+        .stats {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            background: rgba(0, 0, 0, 0.7);
+            color: white;
+            padding: 15px;
+            border-radius: 8px;
+            font-size: 18px;
+        }
+
+        .stats div {
+            margin: 5px 0;
+        }
+
+        .game-over,
+        .level-complete {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: rgba(0, 0, 0, 0.9);
+            color: white;
+            padding: 30px;
+            border-radius: 12px;
+            text-align: center;
+            pointer-events: auto;
+        }
+
+        .game-over h2,
+        .level-complete h2 {
+            font-size: 32px;
+            margin: 0 0 20px 0;
+        }
+
+        .game-over p {
+            font-size: 20px;
+            margin: 10px 0;
+        }
+
+        .game-over button {
+            background: #4CAF50;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            font-size: 18px;
+            border-radius: 6px;
+            cursor: pointer;
+            margin-top: 20px;
+            transition: background 0.3s;
+        }
+
+        .game-over button:hover {
+            background: #45a049;
+        }
+
+        .controls {
+            position: absolute;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(0, 0, 0, 0.7);
+            color: white;
+            padding: 15px;
+            border-radius: 8px;
+            text-align: center;
+            font-size: 16px;
+        }
+
+        .controls p {
+            margin: 5px 0;
+        }
+
+        .level-complete {
+            animation: fadeInOut 2s forwards;
+        }
+
+        @keyframes fadeInOut {
+            0% { opacity: 0; }
+            20% { opacity: 1; }
+            80% { opacity: 1; }
+            100% { opacity: 0; }
+        }
+    </style>
+</head>
+<body>
+    <div class="game-ui">
+        <div class="stats">
+            <div>Level: <span id="level">1</span></div>
+            <div>Health: <span id="health">3</span></div>
+            <div>TNT: <span id="tnt">3</span></div>
+            <div>Score: <span id="score">0</span></div>
+            <div>Time: <span id="time">180</span></div>
+        </div>
+
+        <div class="controls">
+            <p>WASD - Move</p>
+            <p>SPACE - Place TNT</p>
+            <p>Find the time warp block to advance!</p>
+        </div>
+    </div>
+
+    <div class="game-over" id="gameOver">
+        <h2>Game Over!</h2>
+        <p>You survived until level <span id="finalLevel">1</span></p>
+        <p>Final Score: <span id="finalScore">0</span></p>
+        <div id="winners"></div>
+        <button onclick="window.location.reload()">Play Again</button>
+    </div>
+
+    <div class="level-complete" id="levelComplete">
+        <h2>Level Complete!</h2>
+        <p>Advancing to level <span id="nextLevel">2</span></p>
+        <div id="scores"></div>
+    </div>
+
+    <script>
+        // Listen for game state updates from the server
+        window.addEventListener('message', (event) => {
+            if (event.data.type === 'gameState') {
+                const state = event.data.state;
+                
+                // Update UI
+                document.getElementById('level').textContent = state.config.level;
+                document.getElementById('health').textContent = state.health;
+                document.getElementById('tnt').textContent = state.tntCount;
+                document.getElementById('score').textContent = state.score;
+                document.getElementById('time').textContent = Math.ceil(state.timeLeft);
+                
+                // Update players list
+                const playersList = document.getElementById('playersList');
+                playersList.innerHTML = '<h4>Players:</h4>';
+                
+                state.players.forEach(player => {
+                    const playerDiv = document.createElement('div');
+                    playerDiv.className = 'player-info';
+                    playerDiv.style.borderLeft = `3px solid ${player.color}`;
+                    playerDiv.innerHTML = `
+                        <span class="player-color" style="background-color: ${player.color}"></span>
+                        ${player.name}
+                        <br>
+                        Health: ${player.health} | TNT: ${player.tntCount} | Score: ${player.score}
+                        ${!player.isAlive ? ' (DEAD)' : ''}
+                    `;
+                    playersList.appendChild(playerDiv);
+                });
+                
+                // Update powerup status for current player
+                const currentPlayer = state.players.find(p => p.id === event.data.playerId);
+                if (currentPlayer) {
+                    document.getElementById('shield').style.display = 
+                        currentPlayer.hasShield ? 'block' : 'none';
+                    document.getElementById('invisible').style.display = 
+                        currentPlayer.isInvisible ? 'block' : 'none';
+                    document.getElementById('remoteCount').textContent = 
+                        currentPlayer.remoteDetonators;
+                }
+                
+                // Show game over screen
+                if (state.isGameOver) {
+                    document.getElementById('gameOver').style.display = 'block';
+                    document.getElementById('finalLevel').textContent = state.config.level;
+                    
+                    const winnersDiv = document.getElementById('winners');
+                    winnersDiv.innerHTML = '';
+                    
+                    if (state.gameMode === 'versus') {
+                        const winner = state.players.find(p => p.isAlive);
+                        if (winner) {
+                            winnersDiv.innerHTML = `
+                                <h3>Winner: ${winner.name}</h3>
+                                <p>Score: ${winner.score}</p>
+                            `;
+                        }
+                    } else {
+                        const scores = state.players
+                            .sort((a, b) => b.score - a.score)
+                            .map(p => `${p.name}: ${p.score}`);
+                        winnersDiv.innerHTML = `
+                            <h3>Final Scores:</h3>
+                            <p>${scores.join('<br>')}</p>
+                        `;
+                    }
+                }
+                
+                // Show level complete screen
+                if (state.isLevelComplete) {
+                    document.getElementById('levelComplete').style.display = 'block';
+                    document.getElementById('nextLevel').textContent = state.config.level + 1;
+                    
+                    const scoresDiv = document.getElementById('scores');
+                    const scores = state.players
+                        .sort((a, b) => b.score - a.score)
+                        .map(p => `${p.name}: ${p.score}`);
+                    scoresDiv.innerHTML = `<p>${scores.join('<br>')}</p>`;
+                    
+                    setTimeout(() => {
+                        document.getElementById('levelComplete').style.display = 'none';
+                    }, 2000);
+                }
+            }
+        });
+    </script>
+</body>
+</html> 

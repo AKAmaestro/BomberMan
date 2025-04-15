@@ -1,0 +1,20 @@
+{
+  "name": "voxel-dreams",
+  "version": "1.0.0",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "bun run index.ts",
+    "dev": "bun --watch run index.ts",
+    "build": "bun build index.ts --outdir dist"
+  },
+  "dependencies": {
+    "@hytopia.com/assets": "^0.2.8",
+    "hytopia": "^0.3.33"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.0.0"
+  },
+  "module": "index.ts"
+}

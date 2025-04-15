@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "hytopia-helper": {
+      "command": "bunx",
+      "args": [
+        "-y",
+        "topia-mcp@latest",
+        "serve",
+        "--dir",
+        "--resources",
+        "D:\\GITHUB\\Hytopia-games\\Hytopia-demo"
+      ]
+    }
+  }
+}
