@@ -1,43 +1,62 @@
 import { World, Entity, EntityEvent, PlayerEntity, Audio, ColliderShape, RigidBodyType, CollisionGroup } from 'hytopia';
-import { v4 as uuidv4 } from 'uuid';
-import type { GameState, GameConfig, Block, Player, Enemy, Vector3, TNT } from '../types/GameTypes';
-import { BlockType, PowerUpType, EnemyType } from '../types/BombermanEnums';
+import type { 
+  GameState, 
+  GameConfig, 
+  Block, 
+  Player, 
+  Enemy,
+  TNT,
+  Vector3
+} from '../types/GameTypes';
+import { BlockType, PowerupType, EnemyType } from '../types/GameTypes';
 import { DEFAULT_CONFIG } from '../config/gameConfig';
 
 export class GameManager {
   private world: World;
   private config: GameConfig;
-  private state: GameState;
+  private _state: GameState;
   private blockEntities: Map<string, Entity>;
   private playerEntities: Map<string, PlayerEntity>;
   private enemyEntities: Map<string, Entity>;
   private tntEntities: Map<string, Entity>;
+  private idCounter: number = 0;
 
   constructor(world: World, config: GameConfig = DEFAULT_CONFIG) {
     this.world = world;
     this.config = config;
-    this.state = this.initializeGameState();
+    this._state = this.initializeGameState();
     this.blockEntities = new Map();
     this.playerEntities = new Map();
     this.enemyEntities = new Map();
     this.tntEntities = new Map();
+    this.setupEventListeners();
   }
 
   private initializeGameState(): GameState {
     return {
-      players: new Map(),
-      enemies: new Map(),
-      blocks: new Map(),
-      tnt: new Map(),
-      currentLevel: 1,
-      timeLeft: this.config.levelTimeLimit,
+      blocks: new Map<string, Block>(),
+      players: new Map<string, Player>(),
+      enemies: new Map<string, Enemy>(),
+      tnt: new Map<string, TNT>(),
       gridSize: this.config.initialGridSize,
       gameStatus: 'waiting',
+      score: 0,
+      highScore: 0,
+      timeLeft: this.config.levelTimeLimit,
+      currentLevel: 1
     };
   }
 
+  private setupEventListeners(): void {
+    this.world.on(EntityEvent.ENTITY_COLLISION, ({ entity, otherEntity, started }) => {
+      if (started && entity instanceof Entity && otherEntity) {
+        this.handleTNTCollision(entity, otherEntity);
+      }
+    });
+  }
+
   public startGame(): void {
-    this.state.gameStatus = 'playing';
+    this._state.gameStatus = 'playing';
     this.generateLevel();
     this.startGameLoop();
     
@@ -51,12 +70,12 @@ export class GameManager {
   }
 
   private generateLevel(): void {
-    const { gridSize } = this.state;
+    const { gridSize } = this._state;
     
     // Clear existing blocks
     this.blockEntities.forEach(entity => entity.despawn());
     this.blockEntities.clear();
-    this.state.blocks.clear();
+    this._state.blocks.clear();
 
     // Generate walls and breakable blocks
     for (let x = 0; x < gridSize; x++) {
@@ -81,16 +100,19 @@ export class GameManager {
     }
 
     // Add power-ups
-    this.addPowerups();
+    this.addPowerups(5);
 
     // Add time warp block
     this.addTimeWarpBlock();
+
+    // Spawn enemies
+    this.spawnEnemies();
   }
 
-  private createBlock(position: Vector3, type: BlockType, powerUpType?: PowerUpType): void {
+  private createBlock(position: Vector3, type: BlockType, powerupType?: PowerupType): void {
     const blockId = `block_${position.x}_${position.z}`;
-    const block: Block = { type, position, powerUpType };
-    this.state.blocks.set(blockId, block);
+    const block: Block = { type, position, powerupType };
+    this._state.blocks.set(blockId, block);
 
     const blockEntity = new Entity({
       modelUri: type === BlockType.WALL ? 'models/items/iron-ingot.gltf' : 'models/items/gold-ingot.gltf',
@@ -114,50 +136,54 @@ export class GameManager {
     this.blockEntities.set(blockId, blockEntity);
   }
 
-  private addPowerups(): void {
-    const breakableBlocks = Array.from(this.state.blocks.values())
-      .filter(block => block.type === BlockType.BREAKABLE);
+  private getEmptyBlocks(): Block[] {
+    return Array.from(this._state.blocks.values())
+      .filter(block => block.type === BlockType.EMPTY);
+  }
 
-    // Add power-ups to 30% of breakable blocks
-    const powerUpCount = Math.floor(breakableBlocks.length * 0.3);
-    const powerUpTypes = Object.values(PowerUpType);
-
-    for (let i = 0; i < powerUpCount; i++) {
-      const randomBlock = breakableBlocks[Math.floor(Math.random() * breakableBlocks.length)];
-      if (!randomBlock) continue;
-      randomBlock.powerUpType = powerUpTypes[Math.floor(Math.random() * powerUpTypes.length)];
+  private addPowerups(numPowerups: number): void {
+    const emptyBlocks = this.getEmptyBlocks();
+    for (let i = 0; i < numPowerups; i++) {
+      const randomBlock = emptyBlocks[Math.floor(Math.random() * emptyBlocks.length)];
+      if (randomBlock) {
+        randomBlock.type = BlockType.POWERUP;
+        randomBlock.powerupType = this.getRandomPowerupType();
+      }
     }
   }
 
-  private addTimeWarpBlock(): void {
-    const emptySpaces = Array.from(this.state.blocks.values())
-      .filter(block => block.type === BlockType.EMPTY);
+  private getRandomPowerupType(): PowerupType {
+    return PowerupType.HEALTH; // Default powerup type
+  }
 
-    const randomBlock = emptySpaces[Math.floor(Math.random() * emptySpaces.length)];
+  private addTimeWarpBlock(): void {
+    const emptyBlocks = this.getEmptyBlocks();
+    const randomBlock = emptyBlocks[Math.floor(Math.random() * emptyBlocks.length)];
     if (!randomBlock) return;
-    this.createBlock(randomBlock.position, BlockType.TIME_WARP);
+    
+    randomBlock.type = BlockType.PORTAL;
   }
 
   public addPlayer(playerEntity: PlayerEntity): void {
+    const playerId = playerEntity.id || this.generateId();
     const player: Player = {
-      id: playerEntity.id,
+      id: playerId,
       position: { x: 1, y: 0, z: 1 },
-      health: this.config.playerHealth,
+      health: this.config.maxHealth,
       tntCount: this.config.initialTNTCount,
-      speed: 1,
-      explosionRadius: this.config.explosionRadius,
       hasShield: false,
+      isInvisible: false,
       remoteDetonators: 0,
-      score: 0,
+      speed: 1
     };
 
-    this.state.players.set(player.id, player);
-    this.playerEntities.set(player.id, playerEntity);
+    this._state.players.set(playerId, player);
+    this.playerEntities.set(playerId, playerEntity);
     playerEntity.setPosition(player.position);
   }
 
   public removePlayer(playerId: string): void {
-    this.state.players.delete(playerId);
+    this._state.players.delete(playerId);
     const playerEntity = this.playerEntities.get(playerId);
     if (playerEntity) {
       playerEntity.despawn();
@@ -165,53 +191,34 @@ export class GameManager {
     }
   }
 
-  public placeTNT(playerId: string, position: Vector3): void {
-    const player = this.state.players.get(playerId);
-    if (!player || player.tntCount <= 0) return;
-
-    const tntId = uuidv4();
-    const tnt: TNT = {
-      id: tntId,
+  private createPlayer(id: string, position: Vector3): Player {
+    return {
+      id,
       position,
-      placedBy: playerId,
-      explosionRadius: player.explosionRadius,
-      timeToExplode: 3000, // 3 seconds
+      health: this.config.maxHealth,
+      tntCount: this.config.initialTNTCount,
+      hasShield: false,
+      isInvisible: false,
+      remoteDetonators: 0
     };
+  }
 
-    this.state.tnt.set(tntId, tnt);
-    player.tntCount--;
-
-    // Create TNT entity
-    const tntEntity = new Entity({
-      modelUri: 'models/items/firework.gltf',
-      modelScale: 0.5,
-      rigidBodyOptions: {
-        type: RigidBodyType.FIXED,
-        colliders: [
-          {
-            shape: ColliderShape.BALL,
-            radius: 0.25,
-          },
-        ],
-      },
-    });
-
-    tntEntity.spawn(this.world, position);
-    this.tntEntities.set(tntId, tntEntity);
-
-    // Play placement sound
-    new Audio({
-      uri: 'audio/sfx/ui/inventory-place-item.mp3',
-      position,
-      volume: 1,
-    }).play(this.world);
-
-    // Schedule explosion
-    setTimeout(() => this.explodeTNT(tntId), tnt.timeToExplode);
+  private placeTNT(player: Player, position: Vector3): void {
+    if (player.tntCount > 0) {
+      const tnt: TNT = {
+        id: this.generateId(),
+        position,
+        placedBy: player.id,
+        explosionRadius: this.config.explosionRadius,
+        timeToExplode: 3000 // 3 seconds
+      };
+      this._state.tnt.set(tnt.id, tnt);
+      player.tntCount--;
+    }
   }
 
   private explodeTNT(tntId: string): void {
-    const tnt = this.state.tnt.get(tntId);
+    const tnt = this._state.tnt.get(tntId);
     if (!tnt) return;
 
     // Play explosion sound
@@ -225,7 +232,7 @@ export class GameManager {
     this.checkExplosionDamage(tnt);
 
     // Remove TNT
-    this.state.tnt.delete(tntId);
+    this._state.tnt.delete(tntId);
     const tntEntity = this.tntEntities.get(tntId);
     if (tntEntity) {
       tntEntity.despawn();
@@ -237,21 +244,21 @@ export class GameManager {
     const { position, explosionRadius } = tnt;
 
     // Check players
-    this.state.players.forEach((player, playerId) => {
+    this._state.players.forEach((player, playerId) => {
       if (this.isInExplosionRange(player.position, position, explosionRadius)) {
         this.damagePlayer(playerId, 25);
       }
     });
 
     // Check enemies
-    this.state.enemies.forEach((enemy, enemyId) => {
+    this._state.enemies.forEach((enemy, enemyId) => {
       if (this.isInExplosionRange(enemy.position, position, explosionRadius)) {
         this.damageEnemy(enemyId, 50);
       }
     });
 
     // Check blocks
-    this.state.blocks.forEach((block, blockId) => {
+    this._state.blocks.forEach((block, blockId) => {
       if (block.type === BlockType.BREAKABLE && 
           this.isInExplosionRange(block.position, position, explosionRadius)) {
         this.destroyBlock(blockId);
@@ -264,7 +271,7 @@ export class GameManager {
   }
 
   private damagePlayer(playerId: string, amount: number): void {
-    const player = this.state.players.get(playerId);
+    const player = this._state.players.get(playerId);
     if (!player) return;
 
     if (player.hasShield) {
@@ -286,7 +293,7 @@ export class GameManager {
   }
 
   private damageEnemy(enemyId: string, amount: number): void {
-    const enemy = this.state.enemies.get(enemyId);
+    const enemy = this._state.enemies.get(enemyId);
     if (!enemy) return;
 
     enemy.health -= amount;
@@ -296,16 +303,16 @@ export class GameManager {
   }
 
   private destroyBlock(blockId: string): void {
-    const block = this.state.blocks.get(blockId);
+    const block = this._state.blocks.get(blockId);
     if (!block) return;
 
     // Handle power-up reveal
-    if (block.powerUpType) {
-      this.createPowerUp(block.position, block.powerUpType);
+    if (block.powerupType) {
+      this.createPowerUp(block.position, block.powerupType);
     }
 
     // Remove block
-    this.state.blocks.delete(blockId);
+    this._state.blocks.delete(blockId);
     const blockEntity = this.blockEntities.get(blockId);
     if (blockEntity) {
       blockEntity.despawn();
@@ -320,7 +327,7 @@ export class GameManager {
     }).play(this.world);
   }
 
-  private createPowerUp(position: Vector3, type: PowerUpType): void {
+  private createPowerUp(position: Vector3, type: PowerupType): void {
     const powerUpEntity = new Entity({
       modelUri: 'models/items/golden-apple.gltf',
       modelScale: 0.5,
@@ -339,68 +346,98 @@ export class GameManager {
     powerUpEntity.spawn(this.world, position);
     powerUpEntity.on(EntityEvent.ENTITY_COLLISION, ({ otherEntity }) => {
       if (otherEntity instanceof PlayerEntity) {
-        this.applyPowerUp(otherEntity.id, type);
-        powerUpEntity.despawn();
+        const playerId = otherEntity.id;
+        if (playerId) {
+          this.applyPowerUp(playerId, type);
+          powerUpEntity.despawn();
+        }
       }
     });
   }
 
-  private applyPowerUp(playerId: string, type: PowerUpType): void {
-    const player = this.state.players.get(playerId);
-    if (!player) return;
-
-    switch (type) {
-      case PowerUpType.HEALTH:
-        player.health = Math.min(player.health + 25, this.config.playerHealth);
-        break;
-      case PowerUpType.TNT:
-        player.tntCount = Math.min(player.tntCount + 1, this.config.maxTNTCount);
-        break;
-      case PowerUpType.SPEED:
-        player.speed *= 1.2;
-        break;
-      case PowerUpType.EXPLOSION_RADIUS:
-        player.explosionRadius++;
-        break;
-      case PowerUpType.SHIELD:
-        player.hasShield = true;
-        break;
-      case PowerUpType.REMOTE_DETONATOR:
-        player.remoteDetonators++;
-        break;
+  private applyPowerUp(playerId: string, type: PowerupType): void {
+    const player = this._state.players.get(playerId);
+    if (player) {
+      switch (type) {
+        case PowerupType.HEALTH:
+          player.health = Math.min(player.health + 50, this.config.maxHealth);
+          break;
+        case PowerupType.EXTRA_TNT:
+          player.tntCount += 1;
+          break;
+        case PowerupType.SHIELD:
+          player.hasShield = true;
+          break;
+        case PowerupType.TELEPORT:
+          const emptyBlocks = Array.from(this._state.blocks.values())
+            .filter(b => b.type === BlockType.EMPTY);
+          if (emptyBlocks.length > 0) {
+            const randomBlock = emptyBlocks[Math.floor(Math.random() * emptyBlocks.length)];
+            if (randomBlock) {
+              player.position = { ...randomBlock.position };
+            }
+          }
+          break;
+        case PowerupType.INVISIBILITY:
+          player.isInvisible = true;
+          setTimeout(() => { player.isInvisible = false; }, 10000);
+          break;
+        case PowerupType.REMOTE_DETONATOR:
+          player.remoteDetonators += 1;
+          break;
+      }
+      
+      // Remove the powerup
+      const block = this._state.blocks.get(player.id);
+      if (block) {
+        block.type = BlockType.EMPTY;
+        block.powerupType = undefined;
+      }
     }
-
-    // Play power-up sound
-    new Audio({
-      uri: 'audio/sfx/ui/notification-1.mp3',
-      position: player.position,
-      volume: 1,
-    }).play(this.world);
   }
 
-  private spawnEnemy(): void {
-    const enemyId = uuidv4();
-    const enemyTypes = Object.values(EnemyType);
-    const type = enemyTypes[Math.floor(Math.random() * enemyTypes.length)];
+  private spawnEnemies(): void {
+    const numEnemies = Math.floor(this._state.currentLevel * 1.5);
+    const enemyTypes: EnemyType[] = [
+        EnemyType.BASIC,
+        EnemyType.FAST,
+        EnemyType.TANK,
+        EnemyType.BOMBER,
+        EnemyType.TELEPORTER
+    ];
 
-    // Find empty position
-    const emptySpaces = Array.from(this.state.blocks.values())
-      .filter(block => block.type === BlockType.EMPTY);
-    const randomPosition = emptySpaces[Math.floor(Math.random() * emptySpaces.length)]?.position;
-    if (!randomPosition) return;
+    for (let i = 0; i < numEnemies; i++) {
+        const x = Math.floor(Math.random() * (this._state.gridSize - 2)) + 1;
+        const z = Math.floor(Math.random() * (this._state.gridSize - 2)) + 1;
+        const type = enemyTypes[Math.floor(Math.random() * enemyTypes.length)];
 
+        if (!this._state.blocks.has(`${x},${0},${z}`)) {
+            this.createEnemy(x, 0, z, type);
+        }
+    }
+  }
+
+  private generateId(): string {
+    this.idCounter += 1;
+    return `id_${Date.now()}_${this.idCounter.toString()}`;
+  }
+
+  private createEnemy(x: number, y: number, z: number, type: EnemyType): void {
+    const enemyId = this.generateId();
     const enemy: Enemy = {
       id: enemyId,
       type,
-      position: randomPosition,
+      position: { x, y, z },
       health: type === EnemyType.TANK ? 100 : 50,
       speed: type === EnemyType.FAST ? 2 : 1,
+      tntCount: type === EnemyType.BOMBER ? 3 : 0,
+      lastBombTime: 0
     };
 
-    this.state.enemies.set(enemyId, enemy);
+    this._state.enemies.set(enemyId, enemy);
 
     const enemyEntity = new Entity({
-      modelUri: 'models/npcs/zombie.gltf',
+      modelUri: `models/npcs/${type.toLowerCase()}.gltf`,
       modelScale: 1,
       modelLoopedAnimations: ['walk'],
       rigidBodyOptions: {
@@ -415,14 +452,16 @@ export class GameManager {
       },
     });
 
-    enemyEntity.spawn(this.world, randomPosition);
+    enemyEntity.spawn(this.world, { x, y, z });
     this.enemyEntities.set(enemyId, enemyEntity);
+
+    // Set up enemy behavior
+    enemyEntity.on(EntityEvent.TICK, ({ tickDeltaMs }) => {
+      this.moveEnemy(enemy);
+    });
   }
 
-  private moveEnemy(enemyId: string): void {
-    const enemy = this.state.enemies.get(enemyId);
-    if (!enemy) return;
-
+  private moveEnemy(enemy: Enemy): void {
     const possibleDirections: Vector3[] = [
       { x: 1, y: 0, z: 0 },
       { x: -1, y: 0, z: 0 },
@@ -430,35 +469,93 @@ export class GameManager {
       { x: 0, y: 0, z: -1 }
     ];
 
-    const validDirections = possibleDirections.filter(dir => {
-      const newPos = {
-        x: enemy.position.x + dir.x,
-        y: enemy.position.y + dir.y,
-        z: enemy.position.z + dir.z
-      };
-      return this.isValidPosition(newPos);
-    });
-
-    if (validDirections.length === 0) return;
-
-    const newDirection = validDirections[Math.floor(Math.random() * validDirections.length)];
-    if (!newDirection) return;
-
-    const newPosition = {
-      x: enemy.position.x + newDirection.x,
-      y: enemy.position.y + newDirection.y,
-      z: enemy.position.z + newDirection.z
-    };
-
-    enemy.position = newPosition;
-    const enemyEntity = this.enemyEntities.get(enemyId);
-    if (enemyEntity) {
-      enemyEntity.setPosition(newPosition);
+    // Enemy-specific behavior
+    switch (enemy.type) {
+      case EnemyType.FAST:
+        // Fast enemies move twice per tick and prefer directions towards the nearest player
+        this.moveFastEnemy(enemy, possibleDirections);
+        break;
+      case EnemyType.TANK:
+        // Tank enemies move slower but can break through destructible blocks
+        this.moveTankEnemy(enemy, possibleDirections);
+        break;
+      case EnemyType.BOMBER:
+        // Bomber enemies occasionally place TNT
+        this.moveBomberEnemy(enemy, possibleDirections);
+        break;
+      case EnemyType.TELEPORTER:
+        // Teleporter enemies can occasionally teleport to a random valid position
+        this.moveTeleporterEnemy(enemy, possibleDirections);
+        break;
+      default:
+        // Default movement behavior
+        this.moveDefaultEnemy(enemy, possibleDirections);
     }
   }
 
+  private moveFastEnemy(enemy: Enemy, possibleDirections: Vector3[]): void {
+    const nearestPlayer = this.findNearestPlayer(enemy.position);
+    if (nearestPlayer) {
+      // Sort directions by distance to nearest player
+      possibleDirections.sort((a, b) => {
+        const posA = { 
+          x: enemy.position.x + a.x, 
+          y: enemy.position.y, 
+          z: enemy.position.z + a.z 
+        };
+        const posB = { 
+          x: enemy.position.x + b.x, 
+          y: enemy.position.y, 
+          z: enemy.position.z + b.z 
+        };
+        const distA = this.getDistance(posA, nearestPlayer.position);
+        const distB = this.getDistance(posB, nearestPlayer.position);
+        return distA - distB;
+      });
+
+      // Move twice per tick
+      for (let i = 0; i < 2; i++) {
+        const validDirections = possibleDirections.filter(dir => {
+          const newPos = {
+            x: enemy.position.x + dir.x,
+            y: enemy.position.y,
+            z: enemy.position.z + dir.z
+          };
+          return this.isValidPosition(newPos);
+        });
+
+        if (validDirections.length > 0) {
+          const newDirection = validDirections[0];
+          if (newDirection) {
+            enemy.position = {
+              x: enemy.position.x + newDirection.x,
+              y: enemy.position.y,
+              z: enemy.position.z + newDirection.z
+            };
+          }
+        }
+      }
+    }
+  }
+
+  private moveTankEnemy(enemy: Enemy, possibleDirections: Vector3[]): void {
+    // Implement tank enemy movement logic here
+  }
+
+  private moveBomberEnemy(enemy: Enemy, possibleDirections: Vector3[]): void {
+    // Implement bomber enemy movement logic here
+  }
+
+  private moveTeleporterEnemy(enemy: Enemy, possibleDirections: Vector3[]): void {
+    // Implement teleporter enemy movement logic here
+  }
+
+  private moveDefaultEnemy(enemy: Enemy, possibleDirections: Vector3[]): void {
+    // Implement default enemy movement logic here
+  }
+
   private removeEnemy(enemyId: string): void {
-    this.state.enemies.delete(enemyId);
+    this._state.enemies.delete(enemyId);
     const enemyEntity = this.enemyEntities.get(enemyId);
     if (enemyEntity) {
       enemyEntity.despawn();
@@ -468,13 +565,13 @@ export class GameManager {
 
   private isValidPosition(position: Vector3): boolean {
     // Check if position is within grid bounds
-    if (position.x < 0 || position.x >= this.state.gridSize ||
-        position.z < 0 || position.z >= this.state.gridSize) {
+    if (position.x < 0 || position.x >= this._state.gridSize ||
+        position.z < 0 || position.z >= this._state.gridSize) {
       return false;
     }
 
     // Check if position is occupied by a block
-    const isOccupied = Array.from(this.state.blocks.values()).some(block =>
+    const isOccupied = Array.from(this._state.blocks.values()).some(block =>
       block.position.x === position.x && block.position.z === position.z);
 
     return !isOccupied;
@@ -485,30 +582,30 @@ export class GameManager {
     let enemySpawnTimer = 0;
     let powerUpSpawnTimer = 0;
 
-    this.world.on(EntityEvent.TICK, ({ deltaTimeMs }) => {
-      if (this.state.gameStatus !== 'playing') return;
+    this.world.on(EntityEvent.TICK, ({ tickDeltaMs }) => {
+      if (this._state.gameStatus !== 'playing') return;
 
       const currentTime = Date.now();
-      const deltaSeconds = deltaTimeMs / 1000;
+      const deltaSeconds = tickDeltaMs / 1000;
 
       // Update timers
-      this.state.timeLeft -= deltaSeconds;
+      this._state.timeLeft -= deltaSeconds;
       enemySpawnTimer += deltaSeconds;
       powerUpSpawnTimer += deltaSeconds;
 
       // Spawn enemies
       if (enemySpawnTimer >= this.config.enemySpawnInterval) {
-        this.spawnEnemy();
+        this.spawnEnemies();
         enemySpawnTimer = 0;
       }
 
       // Move enemies
-      this.state.enemies.forEach((enemy, enemyId) => {
-        this.moveEnemy(enemyId);
+      this._state.enemies.forEach(enemy => {
+        this.moveEnemy(enemy);
       });
 
       // Check game over conditions
-      if (this.state.timeLeft <= 0 || this.state.players.size === 0) {
+      if (this._state.timeLeft <= 0 || this._state.players.size === 0) {
         this.endGame();
       }
 
@@ -517,7 +614,7 @@ export class GameManager {
   }
 
   private endGame(): void {
-    this.state.gameStatus = 'gameOver';
+    this._state.gameStatus = 'gameOver';
     
     // Play game over sound
     new Audio({
@@ -536,12 +633,12 @@ export class GameManager {
   }
 
   public nextLevel(): void {
-    this.state.currentLevel++;
-    this.state.gridSize = Math.min(
-      this.state.gridSize + 2,
+    this._state.currentLevel++;
+    this._state.gridSize = Math.min(
+      this._state.gridSize + 2,
       this.config.maxGridSize
     );
-    this.state.timeLeft = this.config.levelTimeLimit;
+    this._state.timeLeft = this.config.levelTimeLimit;
     this.generateLevel();
 
     // Play level complete sound
@@ -549,5 +646,89 @@ export class GameManager {
       uri: 'audio/sfx/ui/notification-1.mp3',
       volume: 1,
     }).play(this.world);
+  }
+
+  private findEnemyById(id: string): Enemy | undefined {
+    return this._state.enemies.get(id);
+  }
+
+  private handlePowerup(block: Block, player: Player): void {
+    if (block.type !== BlockType.PORTAL || !block.powerupType) return;
+
+    switch (block.powerupType) {
+        case PowerupType.HEALTH:
+            player.health = Math.min(player.health + 1, this.config.maxHealth);
+            break;
+        case PowerupType.EXTRA_TNT:
+            player.tntCount++;
+            break;
+        case PowerupType.SHIELD:
+            player.hasShield = true;
+            break;
+        case PowerupType.INVISIBILITY:
+            player.isInvisible = true;
+            break;
+        case PowerupType.REMOTE_DETONATOR:
+            player.remoteDetonators++;
+            break;
+    }
+
+    block.type = BlockType.EMPTY;
+    block.powerupType = undefined;
+  }
+
+  private handleTNTCollision(tnt: Entity, otherEntity: Entity): void {
+    if (!tnt.id) return;
+    
+    const tntState = this._state.tnt.get(tnt.id);
+    if (!tntState || !tntState.timeToExplode) return;
+
+    // Play explosion sound
+    new Audio({
+      uri: 'audio/sfx/explosion.mp3',
+      volume: 0.8,
+    }).play(this.world);
+
+    // Handle chain reactions with other TNT
+    this._state.tnt.forEach((otherTNT, otherId) => {
+      if (otherId !== tnt.id && this.isInExplosionRange(tntState.position, otherTNT.position, tntState.explosionRadius)) {
+        this.explodeTNT(otherId);
+      }
+    });
+
+    // Check for damage to players, enemies, and blocks
+    this.checkExplosionDamage(tntState);
+  }
+
+  private handlePlayerDeath(playerId: string): void {
+    const player = this._state.players.get(playerId);
+    if (player) {
+      player.health = this.config.maxHealth;
+      player.tntCount = this.config.initialTNTCount;
+      player.hasShield = false;
+      // ... existing code ...
+    }
+  }
+
+  private findNearestPlayer(position: Vector3): Player | undefined {
+    let nearestPlayer: Player | undefined;
+    let minDistance = Infinity;
+
+    this._state.players.forEach(player => {
+      const distance = this.getDistance(position, player.position);
+      if (distance < minDistance) {
+        minDistance = distance;
+        nearestPlayer = player;
+      }
+    });
+
+    return nearestPlayer;
+  }
+
+  private getDistance(pos1: Vector3, pos2: Vector3): number {
+    const dx = pos1.x - pos2.x;
+    const dy = pos1.y - pos2.y;
+    const dz = pos1.z - pos2.z;
+    return Math.sqrt(dx * dx + dy * dy + dz * dz);
   }
 } 
